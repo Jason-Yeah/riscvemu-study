@@ -26,7 +26,7 @@
 #define fatal(msg) fatalf("%s", msg)
 
 // stage3: 用在switch语句上，告诉编译器有些分支不可达
-#define unreachable() (fatalf("unreachable"), __builtin_unreachable())
+#define unreachable() (fatal("unreachable"), __builtin_unreachable())
 
 // stage2
 // 向上/下对齐整数倍
@@ -275,8 +275,7 @@ void set_reset(set_t *);
 /**
  * decode.c
 */
-
-void insn_decode(insn_t *, u32);
+void insn_decode(insn_t * insn, u32 data);
 
 /**
  * syscall.c
