@@ -19,6 +19,7 @@
 
 #include "types.h"
 #include "elfdef.h"
+#include "reg.h"
 
 // stage1
 /* Error handling(exit the program when facing some serious errors) */
@@ -43,7 +44,7 @@
 // Host Program是模拟器本身，要模拟的程序叫做Guest Program
 /**
  * Host Program在一个高位内存中加载，低位的用不到
- * 低位的给Guest Program使用（暂时不涉及页表机制）
+ * 低位的给Guest Program使用（暂时不涉及页表机制）【模拟的逻辑空间】
  */
 #define TO_HOST(addr)  (addr + GUEST_MEMORY_OFFSET)
 #define TO_GUEST(addr) (addr - GUEST_MEMORY_OFFSET)
@@ -94,7 +95,7 @@ typedef struct {
     i8 rs2;         // 指令中的第二个源寄存器编号
     i8 rs3;         // 指令中的第三个源寄存器编号，主要用于某些特定类型的指令，如浮点指令
     i32 imm;       // 指令中的立即数值，通常用于计算地址、偏移量或作为操作数的一部分    
-    i16 csr;        // 指令中的控制状态寄存器地址1
+    i16 csr;        // 指令中的控制状态寄存器地址
     enum insn_type_t type; // 指令的类型，使用枚举类型insn_type_t来表示不同的指令类型，例如加载、存储、算术运算、分支等
     bool rvc;       // 指示指令是否是RVC（RISC-V Compressed）指令，RVC指令是一种压缩格式的指令，占用更少的字节，通常用于提高代码密度和性能
     bool cont;      // 指示指令是否是连续指令，连续指令是指在RVC指令中，某些指令可能需要与下一条指令一起解码和执行，以实现更复杂的操作
@@ -104,6 +105,12 @@ typedef struct {
  * stack.c
  */
 #define STACK_CAP 256
+#define STACK_SIZE 32 * 1024 * 1024
+#define AUXV_SIZE 8
+#define ENVP_SIZE 8
+#define ARGV_END_SIZE 8
+#define ARGC_SIZE 8
+
 typedef struct {
     i64 top;
     u64 elems[STACK_CAP];
@@ -150,17 +157,18 @@ str_t str_append(str_t, const char *);
 */
 typedef struct {
     u64 entry;      // 程序入口点的地址
-    u64 host_alloc; // Host Program的内存分配指针，指向Host Program在内存中分配的空间的当前末尾位置
+    u64 host_alloc; // Host Program的内存分配指针，指向Host Program在内存中分配的空间的当前末尾位置（已对齐的）
     u64 alloc;
-    u64 base;       // 内存的基地址，指向Guest Program在内存中的起始位置
+    u64 base;       // 内存的基地址，指向Guest Program在内存中的起始位置（程序段和堆栈的分界线）
 } mmu_t;
 
 void mmu_load_elf(mmu_t *mmu, int fd);
-u64 mmu_alloc(mmu_t *, i64);
+u64 mmu_alloc(mmu_t *mmu, i64 size);
 
-FORCE_INLINE void mmu_write(u64 addr, u8 *data, size_t len) {
+FORCE_INLINE void mmu_write(u64 addr, u8 *data, size_t len) 
+{
     memcpy((void *)TO_HOST(addr), (void *)data, len);
-}
+} 
 
 /**
  * cache.c
@@ -196,6 +204,12 @@ enum exit_reason_t {
     ecall,
 };
 
+/**
+ * （浮点）控制状态寄存器类型
+ * fflags寄存器用于存储浮点运算的异常标志，
+ * frm寄存器用于存储浮点运算的舍入模式，
+ * fcsr寄存器是一个组合寄存器，包含了fflags和frm的内容。
+ */
 enum csr_t {
     fflags = 0x001,
     frm    = 0x002,
@@ -211,15 +225,14 @@ enum csr_t {
  * The reenter_pc field is used to store the program counter value when re-entering the emulator after an exit, allowing the emulator to resume execution from that point.
  */
 typedef struct {
-    enum exit_reason_t exit_reason;
-    u64 reenter_pc;
-    u64 gp_regs[32];
-    // u64 gp_regs[num_gp_regs];
-    //fp_reg_t fp_regs[num_fp_regs];
+    enum exit_reason_t exit_reason; // 退出原因，none表示正常执行，direct_branch表示直接分支指令，indirect_branch表示间接分支指令，interp表示需要解释执行的指令，ecall表示系统调用指令
+    u64 reenter_pc; // 重新进入程序时（block）的程序计数器值，主要用于在遇到需要解释执行的指令或系统调用指令时，保存当前的程序计数器值，以便在处理完这些指令后能够正确地返回到原来的位置继续执行
+    u64 gp_regs[num_gp_regs]; // RISC-V有32个整数寄存器，使用一个数组来表示它们
+    fp_reg_t fp_regs[num_fp_regs];
     u64 pc;
 } state_t;
 
-// void state_print_regs(state_t *);
+void state_print_regs(state_t *);
 
 // stage1
 /**
@@ -235,28 +248,28 @@ typedef struct {
     cache_t *cache;
 } machine_t;
 
-// typedef void (*exec_block_func_t)(state_t *);
+typedef void (*exec_block_func_t)(state_t *);
 
-// FORCE_INLINE u64 machine_get_gp_reg(machine_t *m, i32 reg) {
-//     assert(reg >= 0 && reg < num_gp_regs);
-//     return m->state.gp_regs[reg];
-// }
+FORCE_INLINE u64 machine_get_gp_reg(machine_t *m, i32 reg) {
+    assert(reg >= 0 && reg < num_gp_regs);
+    return m->state.gp_regs[reg];
+}
 
-// FORCE_INLINE void machine_set_gp_reg(machine_t *m, i32 reg, u64 data) {
-//     assert(reg >= 0 && reg < num_gp_regs);
-//     m->state.gp_regs[reg] = data;
-// }
+FORCE_INLINE void machine_set_gp_reg(machine_t *m, i32 reg, u64 data) {
+    assert(reg >= 0 && reg < num_gp_regs);
+    m->state.gp_regs[reg] = data;
+}
 
-// void machine_setup(machine_t *, int, char **);
-// str_t machine_genblock(machine_t *);
-// u8 *machine_compile(machine_t *, str_t);
-// enum exit_reason_t machine_step(machine_t *);
+void machine_setup(machine_t *m, int argc, char *argv[]);
+str_t machine_genblock(machine_t *);
+u8 *machine_compile(machine_t *, str_t);
+enum exit_reason_t machine_step(machine_t *m);
 void machine_load_program(machine_t *m, char *prog);
 
-// /**
-//  * interp.c
-// */
-// void exec_block_interp(state_t *);
+/**
+ * interp.c
+*/
+void exec_block_interp(state_t *);
 
 /**
  * set.c
@@ -281,6 +294,6 @@ void insn_decode(insn_t * insn, u32 data);
  * syscall.c
 */
 
-// u64 do_syscall(machine_t *, u64);
+u64 do_syscall(machine_t *, u64);
 
 #endif

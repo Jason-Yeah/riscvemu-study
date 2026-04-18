@@ -13,9 +13,9 @@ static void load_phdr(elf64_phdr_t *phdr, elf64_ehdr_t *ehdr, i64 i, FILE *file)
     }
 
     // fread函数用于从文件中读取数据，参数phdr是存储读取数据的缓冲区，1表示每次读取1字节，sizeof(elf64_phdr_t)表示要读取的字节数，file是文件流指针。
-    if(fread(phdr, 1, sizeof(elf64_phdr_t), file) != sizeof(elf64_phdr_t))
+    if(fread((void *)phdr, 1, sizeof(elf64_phdr_t), file) != sizeof(elf64_phdr_t))
     {
-        fatal("read file failed!\nfile too small"); // 如果fread函数返回的字节数不等于要读取的字节数，表示读取文件失败，输出错误信息并退出程序
+        fatal("file too small"); // 如果fread函数返回的字节数不等于要读取的字节数，表示读取文件失败，输出错误信息并退出程序
     }
 }
 
@@ -46,44 +46,12 @@ static void mmu_load_segment(mmu_t *mmu, elf64_phdr_t *phdr, int fd)
                         fd, ROUNDDOWN(offset, page_size));
     assert(addr == aligned_vaddr); // 确保mmap函数返回的地址与对齐后的虚拟地址相同，如果不相同，说明映射失败，程序将终止执行
     
-    // u64 remaining_bss = ROUNDUP(memsz, page_size) - ROUNDDOWN(filesz, page_size); // 计算BSS段的剩余大小，BSS段是未初始化的数据段，通常需要在内存中分配空间但不需要从文件中加载数据。ROUNDUP函数将地址向上对齐到页面边界，确保BSS段的结束地址也是页面对齐的。
-    // if (remaining_bss > 0)
-    // {
-    //     /**
-    //      * mmap函数的参数解释：
-    //      * (void *)(aligned_vaddr + ROUNDDOWN(filesz, page_size))：这是要映射到内存中的地址，计算方式是对齐后的虚拟地址加上对齐后的文件大小，确保BSS段紧跟在加载的文件段之后
-    //      * remaining_bss：这是要映射的内存大小，即BSS段的剩余大小
-    //      * prot：这是内存的保护标志，之前通过flags_to_mmap_prot函数计算得到，确保BSS段具有正确的访问权限
-    //      * MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS：这是映射的标志，MAP_PRIVATE表示映射是私有的，MAP_FIXED表示映射必须在指定的地址进行，MAP_ANONYMOUS表示映射不与任何文件关联，适用于BSS段这种不需要从文件中加载数据的情况
-    //      * -1：这是文件描述符参数，对于匿名映射，文件描述符应该设置为-1
-    //      * 0：这是文件偏移参数，对于匿名映射，偏移应该设置为0
-    //      * 该调用将在内存中分配一块空间用于BSS段，并且该空间的权限与程序段的权限相同，确保BSS段能够正确地被访问和使用。
-    //      */
-    //     u64 bss_addr = (u64)mmap((void *)(aligned_vaddr + ROUNDDOWN(filesz, page_size)), remaining_bss, 
-    //                             prot, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
-    //     assert(bss_addr == aligned_vaddr + ROUNDUP(filesz, page_size)); 
-    // }
-
-    u64 file_end = aligned_vaddr + filesz;
-    u64 file_page_end = aligned_vaddr + ROUNDUP(filesz, page_size);
-    // u64 mem_end = aligned_vaddr + memsz;
-    u64 mem_page_end = aligned_vaddr + ROUNDUP(memsz, page_size);
-
-    // 先把文件尾页中属于 BSS 的那部分清零
-    if (memsz > filesz && file_page_end > file_end)  // 1. 有没有bss 2. 文件尾页中有没有bss
-    {
-        memset((void *)file_end, 0, file_page_end - file_end);
-    }
-
-    // 再补后续整页 BSS
-    if (mem_page_end > file_page_end) 
-    {
-        u64 bss_addr = (u64)mmap((void *)file_page_end,
-                                mem_page_end - file_page_end,
-                                prot,
-                                MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS,
-                                -1, 0);
-        assert(bss_addr == file_page_end);
+    // .bss section
+    u64 remaining_bss = ROUNDUP(memsz, page_size) - ROUNDUP(filesz, page_size);
+    if (remaining_bss > 0) {
+        u64 addr = (u64)mmap((void *)(aligned_vaddr + ROUNDUP(filesz, page_size)),
+             remaining_bss, prot, MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
+        assert(addr == aligned_vaddr + ROUNDUP(filesz, page_size));
     }
 
     // [        | host_alloc        
@@ -129,10 +97,42 @@ void mmu_load_elf(mmu_t *mmu, int fd)
     for (i64 i = 0; i < ehdr->e_phnum; i ++ )
     {
         load_phdr(&phdr, ehdr, i, file); // 拿到第i个程序头部的信息，存储在phdr结构体中
-        
         if (phdr.p_type == PT_LOAD)
         {
             mmu_load_segment(mmu, &phdr, fd);
         }
     }
+}
+
+// i64是说明当前可以开新内存也可以释放内存
+u64 mmu_alloc(mmu_t *mmu, i64 size)
+{
+    // mmap实现申请内存，对齐到pagesize上
+    int pagesize = getpagesize();
+    
+    u64 base = mmu->alloc;
+    assert(base >= mmu->base); 
+
+    // Guest上先更新内存情况，再更新Host上的内存情况
+    mmu->alloc += size;
+    assert(mmu->alloc >= mmu->base); // 确保分配指针没有回绕到基地址之前（不能动了前面程序段的部分）
+
+    if (size > 0 && mmu->alloc > TO_GUEST(mmu->host_alloc))
+    {
+        u64 len = ROUNDUP(mmu->alloc - TO_GUEST(mmu->host_alloc), pagesize);
+        if (mmap((void *)mmu->host_alloc, len,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED)
+            fatal("mmap failed!");
+        mmu->host_alloc += len;
+    }
+    else if (size < 0 && ROUNDUP(mmu->alloc, pagesize) < TO_GUEST(mmu->host_alloc))
+    {
+        u64 len = TO_GUEST(mmu->host_alloc) - ROUNDUP(mmu->alloc, pagesize); // 对齐
+        if (munmap((void *)mmu->host_alloc, len) == -1)
+            fatal(strerror(errno));
+        mmu->host_alloc -= len;
+    }
+    
+    return base;  // RISCV视角旧边界
 }
