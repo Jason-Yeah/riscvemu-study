@@ -93,7 +93,60 @@ static u64 sys_write(machine_t *m) {
 
 static u64 sys_fstat(machine_t *m) {
     GET(a0, fd); GET(a1, addr);
-    return fstat(fd, (struct stat *)TO_HOST(addr));
+    struct stat st;
+    int rc = fstat((int)fd, &st);
+    if (rc != 0) return (u64)rc;
+
+    typedef struct {
+        u64 st_dev;
+        u64 st_ino;
+        u32 st_mode;
+        u32 st_nlink;
+        u32 st_uid;
+        u32 st_gid;
+        u64 st_rdev;
+        u64 __pad1;
+        i64 st_size;
+        i32 st_blksize;
+        i32 __pad2;
+        i64 st_blocks;
+        i64 st_atime_sec;
+        u64 st_atime_nsec;
+        i64 st_mtime_sec;
+        u64 st_mtime_nsec;
+        i64 st_ctime_sec;
+        u64 st_ctime_nsec;
+        u32 __unused4;
+        u32 __unused5;
+    } riscv_stat_t;
+
+    _Static_assert(sizeof(riscv_stat_t) == 128, "unexpected riscv stat size");
+
+    riscv_stat_t rst = {
+        .st_dev = (u64)st.st_dev,
+        .st_ino = (u64)st.st_ino,
+        .st_mode = (u32)st.st_mode,
+        .st_nlink = (u32)st.st_nlink,
+        .st_uid = (u32)st.st_uid,
+        .st_gid = (u32)st.st_gid,
+        .st_rdev = (u64)st.st_rdev,
+        .__pad1 = 0,
+        .st_size = (i64)st.st_size,
+        .st_blksize = (i32)st.st_blksize,
+        .__pad2 = 0,
+        .st_blocks = (i64)st.st_blocks,
+        .st_atime_sec = (i64)st.st_atime,
+        .st_atime_nsec = 0,
+        .st_mtime_sec = (i64)st.st_mtime,
+        .st_mtime_nsec = 0,
+        .st_ctime_sec = (i64)st.st_ctime,
+        .st_ctime_nsec = 0,
+        .__unused4 = 0,
+        .__unused5 = 0,
+    };
+
+    mmu_write(addr, (u8 *)&rst, sizeof(rst));
+    return 0;
 }
 
 static u64 sys_gettimeofday(machine_t *m) {

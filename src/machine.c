@@ -7,25 +7,78 @@
 
 enum exit_reason_t machine_step(machine_t *m)
 {
-    while (true)
+    while(true)
     {
-        m->state.exit_reason = none; // 每次执行指令块前，重置退出原因为none，表示正常执行
-        exec_block_interp(&m->state); // 以解释的方式执行指令块，直到遇到分支指令、系统调用指令或者需要解释执行的指令为止
-        assert(m->state.exit_reason != none); // 断言退出原因不为none，说明exec_block_interp函数已经执行完一个指令块，并且遇到了一个需要处理的情况
-
-        if (m->state.exit_reason == indirect_branch || m->state.exit_reason == direct_branch)
-        {
-            m->state.pc = m->state.reenter_pc; // 如果退出原因是分支指令，重新设置程序计数器(pc)为重新进入程序时的值(reenter_pc)，以便继续执行下一条指令块
-            continue; // 如果退出原因是分支指令，继续执行下一条指令块
+        if (m->state.pc == 0) {
+            return halt;
         }
 
-        // 此时情况是ecall或其他情况需要跳出来
-        break;
-    }
+        // hot就是当前pc的代码具有局部性，被执行很多遍
+        bool hot = true; // hot变量用于标识当前指令块是否是热点代码，初始值为true，表示默认情况下认为指令块是热点代码
+        
+        u8* code = cache_lookup(m->cache, m->state.pc); // 找内存中可执行的区域
+        if (code == NULL) // 如果没找到（当前PC没有可执行代码）
+        {
+            hot = cache_hot(m->cache, m->state.pc); // 判断当前PC是否是热点代码
+            if (hot)
+            {
+                // 该过程是瓶颈段耗时间
+                str_t source = machine_genblock(m); // 生成当前PC所在指令块的源代码
+                // 保证machine_compile返回的和下面的签名一样
+                // 生成代码如格式：`void start(volatile state_t *restrict state) {...}`
+                code = machine_compile(m, source); // 将生成的源代码编译成可执行代码，并返回可执行代码的地址
+            }
+        }
+        
+        if (!hot) // 如果当前PC不是热点代码
+        {
+            // 之前的方式（函数签名与上述一致）
+            code = (u8 *)exec_block_interp; // 将code指向解释执行函数exec_block_interp，以便以解释的方式执行指令块
+        }
 
-    m->state.pc = m->state.reenter_pc; 
-    assert(m->state.exit_reason == ecall);
-    return ecall;
+        while (true)
+        {
+            m->state.exit_reason = none; // 每次执行指令块前，重置退出原因为none，表示正常执行
+            ((exec_block_func_t)code)(&m->state); // 以函数指针的方式调用code指向的函数，传入机器状态的指针作为参数，以执行指令块
+            // exec_block_interp(&m->state); // 以解释的方式执行指令块，直到遇到分支指令、系统调用指令或者需要解释执行的指令为止
+            assert(m->state.exit_reason != none); // 断言退出原因不为none，说明exec_block_interp函数已经执行完一个指令块，并且遇到了一个需要处理的情况
+
+            if (m->state.exit_reason == indirect_branch || m->state.exit_reason == direct_branch)
+            {
+                m->state.pc = m->state.reenter_pc; // 如果退出原因是分支指令，重新设置程序计数器(pc)为重新进入程序时的值(reenter_pc)，以便继续执行下一条指令块
+                code = cache_lookup(m->cache, m->state.reenter_pc);
+                if (code != NULL) continue; // 是热门的，接着快速执行
+                // continue; // 如果退出原因是分支指令，继续执行下一条指令块
+            }
+
+            if(m->state.exit_reason == interp) // 不常用比较复杂的指令
+            {
+                m->state.pc = m->state.reenter_pc;
+                code = (u8 *)exec_block_interp; // 以解释的方式执行指令块
+                continue;
+            }
+
+            // 此时情况是ecall或其他情况需要跳出来
+            break;
+        }
+
+        m->state.pc = m->state.reenter_pc;
+        switch (m->state.exit_reason) // 到底是ecall还是是branch但cache没东西了
+        {
+            case direct_branch:
+            case indirect_branch:
+                // continue execution
+                break;
+            case ecall:
+                return ecall; // 如果退出原因是系统调用指令(ecall)，返回ecall，表示需要处理系统调用
+            case halt:
+                return halt;
+            default:
+                unreachable(); // 其他情况不应该发生，程序将终止执行
+        }
+        // assert(m->state.exit_reason == ecall || m->state.exit_reason == halt);
+        // return m->state.exit_reason;
+    }
 }
 
 /**
@@ -82,4 +135,13 @@ void machine_setup(machine_t *m, int argc, char *argv[])
     // 设置 a0 为 argc，a1 为 argv
     m->state.gp_regs[a0] = args;
     m->state.gp_regs[a1] = m->state.gp_regs[sp] + ARGC_SIZE;
+
+    u64 sp0 = m->state.gp_regs[sp];
+    u64 aligned_sp = sp0 & ~(u64)0xf;
+    if (aligned_sp != sp0) {
+        size_t used = (stack + stack_size) - sp0;
+        memmove((void *)TO_HOST(aligned_sp), (void *)TO_HOST(sp0), used);
+        m->state.gp_regs[sp] = aligned_sp;
+        m->state.gp_regs[a1] = aligned_sp + ARGC_SIZE;
+    }
 }

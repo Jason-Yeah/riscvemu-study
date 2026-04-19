@@ -122,14 +122,14 @@ u64 mmu_alloc(mmu_t *mmu, i64 size)
         u64 len = ROUNDUP(mmu->alloc - TO_GUEST(mmu->host_alloc), pagesize);
         if (mmap((void *)mmu->host_alloc, len,
                 PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED)
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED)
             fatal("mmap failed!");
         mmu->host_alloc += len;
     }
     else if (size < 0 && ROUNDUP(mmu->alloc, pagesize) < TO_GUEST(mmu->host_alloc))
     {
         u64 len = TO_GUEST(mmu->host_alloc) - ROUNDUP(mmu->alloc, pagesize); // 对齐
-        if (munmap((void *)mmu->host_alloc, len) == -1)
+        if (munmap((void *)TO_HOST(ROUNDUP(mmu->alloc, pagesize)), len) == -1)
             fatal(strerror(errno));
         mmu->host_alloc -= len;
     }

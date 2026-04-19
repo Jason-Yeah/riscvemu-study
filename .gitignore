@@ -6,3 +6,5 @@
 
 .vscode/
 .idea/
+
+.gdb_history

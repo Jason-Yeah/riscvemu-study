@@ -343,6 +343,11 @@ static void func_ecall(state_t *state, insn_t *insn) {
     state->reenter_pc = state->pc + 4;
 }
 
+static void func_empty(state_t *state, insn_t *insn) {
+    (void)state;
+    (void)insn;
+}
+
 #define FUNC()                         \
     switch (insn->csr) {               \
     case fflags:                       \
@@ -671,7 +676,6 @@ static void func_fcvt_d_s(state_t *state, insn_t *insn) {
 typedef void (func_t)(state_t *, insn_t *); // 定义一个函数指针类型，指向接受state_t和insn_t指针作为参数的函数  
 
 static func_t *funcs[] = {
-    // 133个函数
     func_lb,
     func_lh,
     func_lw,
@@ -679,6 +683,8 @@ static func_t *funcs[] = {
     func_lbu,
     func_lhu,
     func_lwu,
+    func_empty, // fence
+    func_empty, // fence_i
     func_addi,
     func_slli,
     func_slti,
@@ -735,12 +741,12 @@ static func_t *funcs[] = {
     func_jalr,
     func_jal,
     func_ecall,
-    func_csrrw,
-    func_csrrs,
     func_csrrc,
-    func_csrrwi,
-    func_csrrsi,
     func_csrrci,
+    func_csrrs,
+    func_csrrsi,
+    func_csrrw,
+    func_csrrwi,
     func_flw,
     func_fsw,
     func_fmadd_s,
@@ -803,20 +809,32 @@ static func_t *funcs[] = {
     func_fcvt_d_l,
     func_fcvt_d_lu,
     func_fmv_d_x,
-}; 
+};
+
+_Static_assert(ARRAY_SIZE(funcs) == num_insns, "func table must match insn enum");
 
 // 以解释的方式执行block
 // block是从一个点开始执行到遇到一个branch或者ecall指令为止的连续指令序列
+// 返回void，以*state作为参数仅一个参数的函数签名
 void exec_block_interp(state_t *state)
 {
-    static insn_t insn = {0}; // static关键字使得insn变量在函数调用之间保持其值，并且只初始化一次。
     while(true)
     {
+        if (state->pc == 0) {
+            state->exit_reason = halt;
+            state->reenter_pc = 0;
+            break;
+        }
+        insn_t insn = {0};
         // fetch指令，pc已经是entry point了，从这读指令转TO_HOST机制
         u32 data = *(u32 *)TO_HOST(state->pc); // 从内存中读取指令数据，state->pc是程序计数器，TO_HOST宏将其转换为模拟器地址，*(u32 *)表示将该地址处的数据解释为一个32位无符号整数。
         
         // Decode
         insn_decode(&insn, data); // 解码指令数据，填充insn结构体
+
+        if ((u32)insn.type >= (u32)num_insns) {
+            fatalf("invalid insn type=%d pc=0x%lx data=0x%x", insn.type, state->pc, data);
+        }
         
         // Execute
         funcs[insn.type](state, &insn); // 根据指令类型调用相应的函数来执行指令.

@@ -201,3 +201,51 @@ void *memcpy(void *dest, const void *src, size_t n);
 ### STACK SETUP
 
 由于栈是向下增长，于是先让sp指向最大栈空间
+
+# JIT（Just In Time）即时编译
+
+当前流程Fetch->Decode->Dispatch，存在效率提升空间，分支预测失败和简洁跳转开销很大
+
+- 动态生成可以被执行的机器指令
+  - 把RISCV代码动态翻译成x86代码
+- mmap -> `rwx`内存段上
+- function pointer指向
+- function call执行
+
+## 性能对比
+
+优化前：
+
+```bash
+$ time ./riscvemu playground/prime
+Calculating primes up to 10000000...
+Found 664579 primes.
+
+real    1m49.800s
+user    1m50.219s
+sys     0m0.000s
+```
+
+优化后：
+
+```bash
+$ time ./riscvemu playground/prime
+Calculating primes up to 10000000...
+Found 664579 primes.
+
+real    0m2.331s
+user    0m2.394s
+sys     0m0.029s
+```
+
+对比qemu-risc64:
+
+```bash
+$ time qemu-riscv64 playground/prime
+Calculating primes up to 10000000...
+Found 664579 primes.
+
+real    0m4.578s
+user    0m4.726s
+sys     0m0.009s
+```

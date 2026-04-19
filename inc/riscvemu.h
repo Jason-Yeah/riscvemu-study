@@ -177,13 +177,13 @@ FORCE_INLINE void mmu_write(u64 addr, u8 *data, size_t len)
 #define CACHE_SIZE       (64 * 1024 * 1024)
 
 typedef struct {
-    u64 pc;
-    u64 hot;
-    u64 offset;
+    u64 pc;         // key
+    u64 hot;        // flag
+    u64 offset;     // value
 } cache_item_t;
 
 typedef struct {
-    u8 *jitcode;
+    u8 *jitcode;    // 一整段内容mmap实现
     u64 offset;
     cache_item_t table[CACHE_ENTRY_SIZE];
 } cache_t;
@@ -202,6 +202,7 @@ enum exit_reason_t {
     indirect_branch,
     interp,
     ecall,
+    halt,
 };
 
 /**
